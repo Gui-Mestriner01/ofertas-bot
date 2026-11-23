@@ -1,0 +1,703 @@
+{
+  "name": "A - Coletor de Ofertas",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "aa000000-0000-4000-8000-000000000001",
+      "name": "Agendador",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT chave, valor, tipo FROM config",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000002",
+      "name": "Carregar Config",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -920,
+        300
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Entrada: linhas de config (chave, valor, tipo) do node Carregar Config.\n// Saida: 1 item com todas as chaves ja convertidas para o tipo certo.\n\nconst cfg = {};\n\nfor (const item of $input.all()) {\n  const r = item.json;\n  let v = r.valor;\n\n  if (r.tipo === 'int') v = parseInt(v, 10);\n  else if (r.tipo === 'decimal') v = parseFloat(v);\n  else if (r.tipo === 'bool') v = v === '1' || v === 'true' || v === 1;\n\n  cfg[r.chave] = v;\n}\n\nconst obrigatorias = [\n  'MODO_BUSCA',\n  'KEYWORDS_POR_EXECUCAO',\n  'LIMIT_BUSCA',\n  'PRECO_MINIMO',\n  'PRECO_MAXIMO',\n  'DESCONTO_MINIMO',\n  'EXIGIR_DESCONTO',\n  'SCORE_MINIMO',\n];\n\nconst faltando = obrigatorias.filter((k) => cfg[k] === undefined || cfg[k] === null);\nif (faltando.length) {\n  throw new Error('Config faltando na tabela config: ' + faltando.join(', '));\n}\n\nif (cfg.MODO_BUSCA !== 'search' && cfg.MODO_BUSCA !== 'monitor') {\n  throw new Error(\"MODO_BUSCA deve ser 'search' ou 'monitor'. Veio: \" + cfg.MODO_BUSCA);\n}\n\nreturn [{ json: cfg }];"
+      },
+      "id": "aa000000-0000-4000-8000-000000000003",
+      "name": "Montar Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT k.id, k.termo, k.categoria_id, c.nome AS categoria\nFROM keywords k\nJOIN categorias c ON c.id = k.categoria_id\nWHERE k.ativo = 1 AND c.ativo = 1\nORDER BY (k.ultima_busca IS NULL) DESC, k.ultima_busca ASC\nLIMIT {{ Math.max(1, Math.min(20, Number($json.KEYWORDS_POR_EXECUCAO) || 3)) }}",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000004",
+      "name": "Selecionar Keywords",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -520,
+        300
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Avanca a rotacao antes da busca: se a API falhar, a mesma keyword nao\n// volta na proxima hora. Escape manual - ids sao inteiros, mas filtro\n// mesmo assim para nao confiar no formato vindo do banco.\n\nconst ids = $input\n  .all()\n  .map((i) => parseInt(i.json.id, 10))\n  .filter((n) => Number.isInteger(n) && n > 0);\n\nif (!ids.length) {\n  return [{ json: { sql: null, total: 0 } }];\n}\n\nconst sql =\n  'UPDATE keywords SET ultima_busca = NOW() WHERE id IN (' + ids.join(',') + ')';\n\nreturn [{ json: { sql, total: ids.length } }];"
+      },
+      "id": "aa000000-0000-4000-8000-000000000005",
+      "name": "Montar SQL Rotacao",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000006",
+      "name": "Marcar Keywords Usadas",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -120,
+        520
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "modo-search",
+              "leftValue": "={{ $('Montar Config').first().json.MODO_BUSCA }}",
+              "rightValue": "search",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000007",
+      "name": "IF Modo de Busca?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.mercadolibre.com/sites/MLB/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.termo }}"
+            },
+            {
+              "name": "limit",
+              "value": "={{ Math.max(1, Math.min(50, Number($('Montar Config').first().json.LIMIT_BUSCA) || 50)) }}"
+            },
+            {
+              "name": "condition",
+              "value": "new"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": false
+            }
+          }
+        }
+      },
+      "id": "aa000000-0000-4000-8000-000000000008",
+      "name": "Buscar Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -120,
+        180
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "",
+          "name": "Mercado Livre OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT produto_id, categoria_id, preco_referencia\nFROM watchlist\nWHERE ativo = 1\nORDER BY (ultima_checagem IS NULL) DESC, ultima_checagem ASC\nLIMIT 200",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000009",
+      "name": "Carregar Watchlist",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -120,
+        380
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// /items?ids= aceita no maximo 20 ids por chamada.\n// Produz 1 item por lote, com os ids ja em string pronta pra query.\n\nconst MAX = 20;\nconst VALIDO = /^MLB\\d+$/;\n\nconst linhas = $input.all().map((i) => i.json).filter((r) => r && r.produto_id);\n\nconst validas = linhas.filter((r) => VALIDO.test(String(r.produto_id).trim()));\nconst descartadas = linhas.length - validas.length;\n\nif (descartadas > 0) {\n  console.log('Watchlist: ' + descartadas + ' produto_id fora do padrao MLB999 ignorado(s)');\n}\n\nif (!validas.length) {\n  return [];\n}\n\nconst lotes = [];\nfor (let i = 0; i < validas.length; i += MAX) {\n  const fatia = validas.slice(i, i + MAX);\n  lotes.push({\n    json: {\n      ids: fatia.map((r) => String(r.produto_id).trim()).join(','),\n      total: fatia.length,\n      // guarda a categoria de cada id para o Normalizar reusar\n      categorias: fatia.reduce((acc, r) => {\n        acc[String(r.produto_id).trim()] = r.categoria_id ?? null;\n        return acc;\n      }, {}),\n    },\n  });\n}\n\nreturn lotes;"
+      },
+      "id": "aa000000-0000-4000-8000-000000000010",
+      "name": "Montar Lotes de 20",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.mercadolibre.com/items",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "ids",
+              "value": "={{ $json.ids }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "aa000000-0000-4000-8000-000000000011",
+      "name": "Buscar Items",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        380
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "",
+          "name": "Mercado Livre OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aceita os DOIS formatos de entrada:\n//   search  -> { results: [ item, ... ] }\n//   monitor -> [ { code: 200, body: item }, ... ]\n// Nunca chuta valor: campo ausente vira null e o score simplesmente nao pontua.\n\nconst modo = $('Montar Config').first().json.MODO_BUSCA;\n\n// --- categoria por keyword (modo search) --------------------------------\n// O node HTTP roda 1x por keyword, na ordem, entao o indice alinha.\nlet keywords = [];\ntry {\n  keywords = $('Selecionar Keywords').all().map((i) => i.json);\n} catch (e) {\n  keywords = [];\n}\n\n// --- categoria por produto_id (modo monitor) ----------------------------\nlet mapaCategorias = {};\nif (modo === 'monitor') {\n  try {\n    for (const lote of $('Montar Lotes de 20').all()) {\n      Object.assign(mapaCategorias, lote.json.categorias || {});\n    }\n  } catch (e) {\n    mapaCategorias = {};\n  }\n}\n\nfunction imagemDe(item) {\n  // /items/{id} traz pictures[].secure_url; /search traz apenas thumbnail.\n  if (Array.isArray(item.pictures) && item.pictures.length) {\n    const u = item.pictures[0].secure_url || item.pictures[0].url || null;\n    if (u) return String(u).replace('http://', 'https://');\n  }\n  if (item.thumbnail) {\n    return String(item.thumbnail)\n      .replace('http://', 'https://')\n      .replace(/-I\\.jpg$/, '-O.jpg');\n  }\n  return null;\n}\n\nfunction avaliacaoDe(item) {\n  // Campo historicamente removido/ofuscado pelo ML. Le defensivamente.\n  const r = item.reviews;\n  if (r && typeof r.rating_average === 'number' && r.rating_average > 0) {\n    return Number(r.rating_average);\n  }\n  return null;\n}\n\nfunction vendidosDe(item) {\n  const v = item.sold_quantity;\n  return typeof v === 'number' && v >= 0 ? v : null;\n}\n\nfunction catalogoDe(item) {\n  if (item.catalog_listing === true) return 1;\n  if (item.catalog_product_id) return 1;\n  return 0;\n}\n\nfunction normalizar(item, categoriaId) {\n  const preco = Number(item.price);\n  if (!preco || !Number.isFinite(preco)) return null;\n\n  const orig = Number(item.original_price);\n  const precoOriginal = orig && Number.isFinite(orig) && orig > preco ? orig : null;\n\n  const desconto = precoOriginal\n    ? Math.round((1 - preco / precoOriginal) * 100)\n    : null;\n\n  return {\n    produto_id: item.id,\n    titulo: item.title || null,\n    categoria_id: categoriaId ?? null,\n    preco_atual: preco,\n    preco_original: precoOriginal,\n    desconto,\n    frete_gratis: item.shipping && item.shipping.free_shipping ? 1 : 0,\n    condicao: item.condition || null,\n    catalogo: catalogoDe(item),\n    vendidos: vendidosDe(item),\n    avaliacao: avaliacaoDe(item),\n    link_produto: item.permalink || null,\n    imagem: imagemDe(item),\n    origem: modo,\n  };\n}\n\nconst saida = [];\nconst entradas = $input.all();\nlet erros = 0;\n\nfor (let idx = 0; idx < entradas.length; idx++) {\n  const j = entradas[idx].json;\n\n  if (!j || j.error) {\n    erros++;\n    continue;\n  }\n\n  // formato search\n  if (Array.isArray(j.results)) {\n    const cat = keywords[idx] ? keywords[idx].categoria_id : null;\n    for (const item of j.results) {\n      const n = normalizar(item, cat);\n      if (n) saida.push(n);\n    }\n    continue;\n  }\n\n  // formato monitor: array inteiro num item\n  if (Array.isArray(j)) {\n    for (const r of j) {\n      if (r && r.code === 200 && r.body) {\n        const n = normalizar(r.body, mapaCategorias[r.body.id] ?? null);\n        if (n) saida.push(n);\n      }\n    }\n    continue;\n  }\n\n  // formato monitor: n8n quebrou o array em 1 item por entrada\n  if (j.code === 200 && j.body) {\n    const n = normalizar(j.body, mapaCategorias[j.body.id] ?? null);\n    if (n) saida.push(n);\n    continue;\n  }\n\n  // item cru (caso o ML devolva o objeto direto)\n  if (j.id && j.title) {\n    const n = normalizar(j, mapaCategorias[j.id] ?? null);\n    if (n) saida.push(n);\n  }\n}\n\nif (!saida.length) {\n  const motivo =\n    erros > 0\n      ? 'Todas as ' + erros + ' chamadas a API falharam (403 no /search? confira 2.1).'\n      : 'A API respondeu, mas nenhum item veio no formato esperado.';\n  console.log('Normalizar: 0 itens. ' + motivo);\n}\n\nreturn saida.map((json) => ({ json }));"
+      },
+      "id": "aa000000-0000-4000-8000-000000000012",
+      "name": "Normalizar Dados",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filtra pelos limites da config e pontua de 0 a 100.\n// score_detalhe guarda a conta de cada critério: null = criterio sem dado,\n// 0 = tinha dado e nao pontuou. E o que a FASE 7 confere.\n\nconst cfg = $('Montar Config').first().json;\n\nconst precoMin = Number(cfg.PRECO_MINIMO);\nconst precoMax = Number(cfg.PRECO_MAXIMO);\nconst descontoMin = Number(cfg.DESCONTO_MINIMO);\nconst exigirDesconto = cfg.EXIGIR_DESCONTO === true || cfg.EXIGIR_DESCONTO === 1;\nconst scoreMin = Number(cfg.SCORE_MINIMO);\n\nfunction pontuar(o) {\n  let s = 0;\n  const d = {};\n\n  const desc = o.desconto;\n  if (desc == null) d.desconto = null;\n  else if (desc >= 41) { s += 40; d.desconto = 40; }\n  else if (desc >= 31) { s += 30; d.desconto = 30; }\n  else if (desc >= 21) { s += 20; d.desconto = 20; }\n  else if (desc >= 15) { s += 10; d.desconto = 10; }\n  else d.desconto = 0;\n\n  if (o.frete_gratis) { s += 10; d.frete_gratis = 10; } else d.frete_gratis = 0;\n\n  if (o.avaliacao == null) d.avaliacao = null;\n  else if (o.avaliacao >= 4.5) { s += 15; d.avaliacao = 15; }\n  else if (o.avaliacao >= 4.0) { s += 8; d.avaliacao = 8; }\n  else d.avaliacao = 0;\n\n  if (o.vendidos == null) d.vendas = null;\n  else if (o.vendidos >= 500) { s += 15; d.vendas = 15; }\n  else if (o.vendidos >= 100) { s += 10; d.vendas = 10; }\n  else if (o.vendidos >= 25) { s += 5; d.vendas = 5; }\n  else d.vendas = 0;\n\n  if (o.preco_atual >= 50 && o.preco_atual <= 1500) { s += 10; d.faixa_preco = 10; }\n  else d.faixa_preco = 0;\n\n  if (o.catalogo) { s += 10; d.catalogo = 10; } else d.catalogo = 0;\n\n  if (o.condicao === 'new') { s += 5; d.novo = 5; } else d.novo = 0;\n\n  const total = Math.min(100, s);\n  d.total = total;\n  return { score: total, detalhe: d };\n}\n\nconst aprovados = [];\nconst vistos = new Set();\nconst contagem = {\n  entrada: 0,\n  sem_link: 0,\n  sem_imagem: 0,\n  fora_de_preco: 0,\n  sem_desconto: 0,\n  desconto_baixo: 0,\n  score_baixo: 0,\n  duplicado_na_rodada: 0,\n  aprovado: 0,\n};\n\nfor (const item of $input.all()) {\n  const o = item.json;\n  contagem.entrada++;\n\n  if (!o.produto_id || !o.titulo) { contagem.sem_link++; continue; }\n  if (!o.link_produto) { contagem.sem_link++; continue; }\n  if (!o.imagem) { contagem.sem_imagem++; continue; }\n\n  if (o.preco_atual < precoMin || o.preco_atual > precoMax) {\n    contagem.fora_de_preco++;\n    continue;\n  }\n\n  if (o.desconto == null) {\n    if (exigirDesconto) { contagem.sem_desconto++; continue; }\n  } else if (o.desconto < descontoMin) {\n    contagem.desconto_baixo++;\n    continue;\n  }\n\n  const { score, detalhe } = pontuar(o);\n  if (score < scoreMin) { contagem.score_baixo++; continue; }\n\n  // mesma rodada pode trazer o mesmo produto por 2 keywords diferentes\n  const chave = o.produto_id + '|' + o.preco_atual.toFixed(2);\n  if (vistos.has(chave)) { contagem.duplicado_na_rodada++; continue; }\n  vistos.add(chave);\n\n  contagem.aprovado++;\n  aprovados.push({ ...o, score, score_detalhe: detalhe });\n}\n\nconsole.log('Filtrar e Pontuar: ' + JSON.stringify(contagem));\n\naprovados.sort((a, b) => b.score - a.score);\n\nreturn aprovados.map((json) => ({ json }));"
+      },
+      "id": "aa000000-0000-4000-8000-000000000013",
+      "name": "Filtrar e Pontuar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Escape manual, de proposito: titulo do ML tem virgula e apostrofo, e a\n// opcao Query Parameters do node MySQL e uma lista separada por virgula.\n// INSERT IGNORE + UNIQUE (produto_id, preco_atual) resolve a duplicata.\n\nfunction esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  if (typeof v === 'number') {\n    if (!Number.isFinite(v)) return 'NULL';\n    return String(v);\n  }\n  if (typeof v === 'boolean') return v ? '1' : '0';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/\\u0000/g, '')\n    .replace(/[\\r\\n]+/g, ' ')\n    .trim();\n  return \"'\" + s + \"'\";\n}\n\nconst linhas = [];\n\nfor (const item of $input.all()) {\n  const o = item.json;\n\n  linhas.push(\n    '(' +\n      [\n        esc(o.produto_id),\n        esc(String(o.titulo).slice(0, 250)),\n        esc(o.categoria_id),\n        esc(Number(o.preco_atual).toFixed(2)),\n        o.preco_original == null ? 'NULL' : esc(Number(o.preco_original).toFixed(2)),\n        esc(o.desconto),\n        esc(o.frete_gratis ? 1 : 0),\n        esc(o.condicao),\n        esc(o.catalogo ? 1 : 0),\n        esc(o.vendidos),\n        esc(o.avaliacao),\n        esc(String(o.link_produto).slice(0, 490)),\n        esc(String(o.imagem).slice(0, 490)),\n        esc(o.score),\n        esc(JSON.stringify(o.score_detalhe || {})),\n      ].join(', ') +\n      ')'\n  );\n}\n\nif (!linhas.length) {\n  return [{ json: { sql: null, total: 0 } }];\n}\n\nconst sql =\n  'INSERT IGNORE INTO ofertas\\n' +\n  '  (produto_id, titulo, categoria_id, preco_atual, preco_original, desconto,\\n' +\n  '   frete_gratis, condicao, catalogo, vendidos, avaliacao, link_produto,\\n' +\n  '   imagem, score, score_detalhe)\\n' +\n  'VALUES\\n  ' +\n  linhas.join(',\\n  ');\n\nreturn [{ json: { sql, total: linhas.length } }];"
+      },
+      "id": "aa000000-0000-4000-8000-000000000014",
+      "name": "Montar SQL Fila",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tem-sql",
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000015",
+      "name": "IF Tem Candidato?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000016",
+      "name": "Gravar Fila",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        1300,
+        100
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO logs_execucao (workflow, etapa, status, mensagem)\nVALUES ('A-COLETOR', 'gravar_fila', 'OK',\n        'Candidatos gravados: {{ $('Montar SQL Fila').first().json.total }}')",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000017",
+      "name": "Log Coleta",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        1500,
+        100
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO logs_execucao (workflow, etapa, status, mensagem)\nVALUES ('A-COLETOR', 'gravar_fila', 'AVISO',\n        'Rodada sem candidato aprovado. Ver console do node Filtrar e Pontuar.')",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000018",
+      "name": "Log Rodada Vazia",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        1300,
+        260
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ramo paralelo: mantem a watchlist com o menor preco ja visto.\n// Roda nos dois modos - no modo search isso vai construindo a watchlist\n// que o modo monitor usa depois, caso o /search comece a dar 403.\n\nfunction esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/[\\r\\n]+/g, ' ')\n    .trim();\n  return \"'\" + s + \"'\";\n}\n\nconst vistos = new Map();\n\nfor (const item of $input.all()) {\n  const o = item.json;\n  if (!o.produto_id) continue;\n  // mantem a ocorrencia de menor preco dentro da rodada\n  const atual = vistos.get(o.produto_id);\n  if (!atual || o.preco_atual < atual.preco_atual) vistos.set(o.produto_id, o);\n}\n\nconst linhas = [...vistos.values()].map(\n  (o) =>\n    '(' +\n    [\n      esc(o.produto_id),\n      esc(o.categoria_id),\n      esc(Number(o.preco_atual).toFixed(2)),\n      esc(String(o.titulo || '').slice(0, 250)),\n    ].join(', ') +\n    ', NOW())'\n);\n\nif (!linhas.length) {\n  return [{ json: { sql: null, total: 0 } }];\n}\n\n// LEAST guarda o menor preco historico sem apagar o que ja havia\nconst sql =\n  'INSERT INTO watchlist\\n' +\n  '  (produto_id, categoria_id, preco_referencia, titulo, ultima_checagem)\\n' +\n  'VALUES\\n  ' +\n  linhas.join(',\\n  ') +\n  '\\nON DUPLICATE KEY UPDATE\\n' +\n  '  preco_referencia = LEAST(COALESCE(watchlist.preco_referencia, VALUES(preco_referencia)), VALUES(preco_referencia)),\\n' +\n  '  titulo = COALESCE(VALUES(titulo), watchlist.titulo),\\n' +\n  '  categoria_id = COALESCE(VALUES(categoria_id), watchlist.categoria_id),\\n' +\n  '  ultima_checagem = NOW()';\n\nreturn [{ json: { sql, total: linhas.length } }];"
+      },
+      "id": "aa000000-0000-4000-8000-000000000019",
+      "name": "Montar SQL Watchlist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tem-watchlist",
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000020",
+      "name": "IF Tem Watchlist?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "aa000000-0000-4000-8000-000000000021",
+      "name": "Atualizar Watchlist",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        1300,
+        420
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Agendador": {
+      "main": [
+        [
+          {
+            "node": "Carregar Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Carregar Config": {
+      "main": [
+        [
+          {
+            "node": "Montar Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Config": {
+      "main": [
+        [
+          {
+            "node": "Selecionar Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Selecionar Keywords": {
+      "main": [
+        [
+          {
+            "node": "IF Modo de Busca?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Montar SQL Rotacao",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Rotacao": {
+      "main": [
+        [
+          {
+            "node": "Marcar Keywords Usadas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Modo de Busca?": {
+      "main": [
+        [
+          {
+            "node": "Buscar Search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Carregar Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Search": {
+      "main": [
+        [
+          {
+            "node": "Normalizar Dados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Carregar Watchlist": {
+      "main": [
+        [
+          {
+            "node": "Montar Lotes de 20",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Lotes de 20": {
+      "main": [
+        [
+          {
+            "node": "Buscar Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Items": {
+      "main": [
+        [
+          {
+            "node": "Normalizar Dados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar Dados": {
+      "main": [
+        [
+          {
+            "node": "Filtrar e Pontuar",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Montar SQL Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar e Pontuar": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Fila",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Fila": {
+      "main": [
+        [
+          {
+            "node": "IF Tem Candidato?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Tem Candidato?": {
+      "main": [
+        [
+          {
+            "node": "Gravar Fila",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Rodada Vazia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar Fila": {
+      "main": [
+        [
+          {
+            "node": "Log Coleta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Watchlist": {
+      "main": [
+        [
+          {
+            "node": "IF Tem Watchlist?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Tem Watchlist?": {
+      "main": [
+        [
+          {
+            "node": "Atualizar Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {}
+}

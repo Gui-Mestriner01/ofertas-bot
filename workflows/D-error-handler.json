@@ -1,0 +1,211 @@
+{
+  "name": "D - Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "dd000000-0000-4000-8000-000000000001",
+      "name": "Erro em Qualquer Workflow",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// O Error Trigger entrega { execution, workflow, trigger }.\n// Alguns campos faltam dependendo de onde o crash aconteceu, entao le tudo\n// defensivamente - este workflow NAO pode quebrar, senao o erro fica mudo.\n\nfunction esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/\\u0000/g, '');\n  return \"'\" + s + \"'\";\n}\n\nconst e = $input.first().json || {};\nconst wf = e.workflow || {};\nconst ex = e.execution || {};\nconst err = ex.error || e.error || {};\n\nconst nomeWf = String(wf.name || 'desconhecido').slice(0, 40);\nconst etapa = String(err.node && err.node.name ? err.node.name : ex.lastNodeExecuted || '?').slice(0, 60);\nconst msg = String(err.message || 'sem mensagem').slice(0, 480);\nconst pilha = String(err.stack || err.description || '').slice(0, 2000);\nconst execId = ex.id || '?';\nconst execUrl = ex.url || '';\n\nconst sql =\n  'INSERT INTO logs_execucao (workflow, etapa, status, mensagem, erro)\\n' +\n  'VALUES (' +\n  [esc(nomeWf), esc(etapa), \"'ERRO'\", esc(msg), esc(pilha)].join(', ') +\n  ')';\n\nreturn [\n  {\n    json: {\n      sql,\n      nomeWf,\n      etapa,\n      msg,\n      execId,\n      execUrl,\n    },\n  },\n];"
+      },
+      "id": "dd000000-0000-4000-8000-000000000002",
+      "name": "Montar SQL Erro",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "dd000000-0000-4000-8000-000000000003",
+      "name": "Gravar Log de Erro",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT valor FROM config WHERE chave = 'TELEGRAM_CHAT_ADMIN' LIMIT 1",
+        "options": {}
+      },
+      "id": "dd000000-0000-4000-8000-000000000004",
+      "name": "Buscar Chat Admin",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        0,
+        300
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.valor }}",
+        "text": "=Workflow quebrou\n\nworkflow: {{ $('Montar SQL Erro').first().json.nomeWf }}\nnode: {{ $('Montar SQL Erro').first().json.etapa }}\nexecucao: {{ $('Montar SQL Erro').first().json.execId }}\n\n{{ $('Montar SQL Erro').first().json.msg }}\n\nConsulta: SELECT * FROM vw_erros_recentes;",
+        "additionalFields": {}
+      },
+      "id": "dd000000-0000-4000-8000-000000000005",
+      "name": "Avisar Admin",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot Ofertas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM locks_execucao WHERE nome = 'publicador'",
+        "options": {}
+      },
+      "id": "dd000000-0000-4000-8000-000000000006",
+      "name": "Soltar Lock Preso",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE ofertas\nSET status = 'ERRO',\n    motivo = 'Workflow crashou com a oferta em PROCESSANDO',\n    proxima_tentativa = DATE_ADD(NOW(), INTERVAL 5 MINUTE),\n    lock_owner = NULL\nWHERE status = 'PROCESSANDO'\n  AND atualizado_em <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)",
+        "options": {}
+      },
+      "id": "dd000000-0000-4000-8000-000000000007",
+      "name": "Destravar Ofertas Presas",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Erro em Qualquer Workflow": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Erro": {
+      "main": [
+        [
+          {
+            "node": "Gravar Log de Erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar Log de Erro": {
+      "main": [
+        [
+          {
+            "node": "Buscar Chat Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Chat Admin": {
+      "main": [
+        [
+          {
+            "node": "Avisar Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avisar Admin": {
+      "main": [
+        [
+          {
+            "node": "Soltar Lock Preso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Soltar Lock Preso": {
+      "main": [
+        [
+          {
+            "node": "Destravar Ofertas Presas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

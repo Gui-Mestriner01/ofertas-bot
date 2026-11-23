@@ -1,0 +1,1713 @@
+{
+  "name": "B - Publicador de Ofertas",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9,12,15,18,21 * * *"
+            }
+          ]
+        }
+      },
+      "id": "bb000000-0000-4000-8000-000000000001",
+      "name": "Agendador",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT chave, valor, tipo FROM config",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000002",
+      "name": "Carregar Config",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -1400,
+        300
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = {};\n\nfor (const item of $input.all()) {\n  const r = item.json;\n  let v = r.valor;\n  if (r.tipo === 'int') v = parseInt(v, 10);\n  else if (r.tipo === 'decimal') v = parseFloat(v);\n  else if (r.tipo === 'bool') v = v === '1' || v === 'true' || v === 1;\n  cfg[r.chave] = v;\n}\n\nconst obrigatorias = [\n  'SCORE_MINIMO',\n  'DIAS_SEM_REPETIR',\n  'QUEDA_MINIMA_REPOST',\n  'TOLERANCIA_PRECO',\n  'MAX_TENTATIVAS',\n  'AFILIADO_MODO',\n  'CAPTION_MAX',\n  'TELEGRAM_CHAT_ADMIN',\n];\n\nconst faltando = obrigatorias.filter(\n  (k) => cfg[k] === undefined || cfg[k] === null || cfg[k] === ''\n);\n\nif (faltando.length) {\n  throw new Error(\n    'Config vazia ou faltando: ' +\n      faltando.join(', ') +\n      '. Preencha na tabela config antes de ativar o publicador.'\n  );\n}\n\nreturn [{ json: cfg }];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000003",
+      "name": "Montar Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lock em duas camadas, camada 1: PRIMARY KEY em locks_execucao.\n// ON DUPLICATE KEY so deixa tomar o lock se o anterior expirou,\n// num unico statement (o node MySQL nao roda multi-statement por padrao).\n\nconst dono = 'exec-' + $execution.id;\nconst MINUTOS = 10;\n\nconst sqlAdquirir =\n  \"INSERT INTO locks_execucao (nome, dono, expira_em)\\n\" +\n  \"VALUES ('publicador', '\" +\n  dono.replace(/'/g, '') +\n  \"', DATE_ADD(NOW(), INTERVAL \" +\n  MINUTOS +\n  \" MINUTE))\\n\" +\n  'ON DUPLICATE KEY UPDATE\\n' +\n  '  dono      = IF(expira_em <= NOW(), VALUES(dono), dono),\\n' +\n  '  criado_em = IF(expira_em <= NOW(), NOW(), criado_em),\\n' +\n  '  expira_em = IF(expira_em <= NOW(), VALUES(expira_em), expira_em)';\n\nreturn [{ json: { dono, sqlAdquirir } }];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000004",
+      "name": "Montar SQL Lock",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sqlAdquirir }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000005",
+      "name": "Adquirir Lock",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -800,
+        300
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT dono, expira_em FROM locks_execucao WHERE nome = 'publicador'",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000006",
+      "name": "Checar Lock",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -600,
+        300
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "sou-dono",
+              "leftValue": "={{ $json.dono }}",
+              "rightValue": "={{ $('Montar SQL Lock').first().json.dono }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000007",
+      "name": "IF Sou o Dono?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO logs_execucao (workflow, etapa, status, mensagem)\nVALUES ('B-PUBLICADOR', 'lock', 'AVISO',\n        'Outra execucao esta com o lock. Esta rodada saiu sem publicar.')",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000008",
+      "name": "Log Lock Ocupado",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -200,
+        460
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// O SELECT que concentra TODA a regra anti-repeticao:\n//   score minimo + link cadastrado + janela de N dias\n//   + queda minima de preco + retries pendentes\n// Nao espalhar isso em IFs depois - e aqui que mora a decisao.\n\nconst cfg = $('Montar Config').first().json;\n\nconst scoreMin = parseInt(cfg.SCORE_MINIMO, 10);\nconst dias = parseInt(cfg.DIAS_SEM_REPETIR, 10);\nconst queda = parseFloat(cfg.QUEDA_MINIMA_REPOST);\nconst maxTent = parseInt(cfg.MAX_TENTATIVAS, 10);\nconst exigeLink = String(cfg.AFILIADO_MODO) === 'tabela';\n\nif (![scoreMin, dias, maxTent].every(Number.isFinite) || !Number.isFinite(queda)) {\n  throw new Error('Config numerica invalida no publicador.');\n}\n\nconst fatorQueda = (1 - queda / 100).toFixed(4);\n\nconst sql =\n  'SELECT\\n' +\n  '  o.id, o.produto_id, o.titulo, o.categoria_id,\\n' +\n  '  o.preco_atual, o.preco_original, o.desconto, o.frete_gratis,\\n' +\n  '  o.condicao, o.catalogo, o.vendidos, o.avaliacao,\\n' +\n  '  o.link_produto, o.imagem, o.score, o.status, o.tentativas,\\n' +\n  '  c.nome AS categoria, c.emoji, c.frase_padrao,\\n' +\n  '  la.url_afiliado\\n' +\n  'FROM ofertas o\\n' +\n  'LEFT JOIN categorias      c  ON c.id = o.categoria_id\\n' +\n  'LEFT JOIN links_afiliados la ON la.produto_id = o.produto_id\\n' +\n  'WHERE o.score >= ' +\n  scoreMin +\n  '\\n' +\n  '  AND (\\n' +\n  \"        o.status IN ('NOVO','APROVADO')\\n\" +\n  \"     OR (o.status = 'ERRO'\\n\" +\n  '         AND o.tentativas < ' +\n  maxTent +\n  '\\n' +\n  '         AND o.proxima_tentativa IS NOT NULL\\n' +\n  '         AND o.proxima_tentativa <= NOW())\\n' +\n  '      )\\n' +\n  (exigeLink ? '  AND la.produto_id IS NOT NULL\\n' : '') +\n  '  AND NOT EXISTS (\\n' +\n  '        SELECT 1 FROM ofertas h\\n' +\n  '        WHERE h.produto_id = o.produto_id\\n' +\n  \"          AND h.status = 'ENVIADO'\\n\" +\n  '          AND h.enviado_em >= DATE_SUB(NOW(), INTERVAL ' +\n  dias +\n  ' DAY)\\n' +\n  '          AND o.preco_atual > h.preco_atual * ' +\n  fatorQueda +\n  '\\n' +\n  '      )\\n' +\n  'ORDER BY o.score DESC, o.criado_em ASC\\n' +\n  'LIMIT 1';\n\nreturn [{ json: { sql } }];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000009",
+      "name": "Montar SQL Selecionar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000010",
+      "name": "Selecionar Melhor Oferta",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        0,
+        220
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tem-oferta",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000011",
+      "name": "IF Tem Oferta?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normaliza a linha do banco e decide se esta rodada precisa de aprovacao.\n// Regra: previa so na PRIMEIRA passada (status NOVO). Se o status ja e\n// APROVADO, o workflow E ja liberou - publica direto, senao vira loop.\n\nconst cfg = $('Montar Config').first().json;\nconst o = $input.first().json;\n\nconst modoAprovacao = cfg.MODO_APROVACAO === true || cfg.MODO_APROVACAO === 1;\nconst precisaAprovacao = modoAprovacao && o.status !== 'APROVADO';\n\nreturn [\n  {\n    json: {\n      oferta_id: Number(o.id),\n      produto_id: o.produto_id,\n      titulo: o.titulo,\n      categoria_id: o.categoria_id,\n      categoria: o.categoria || null,\n      emoji: o.emoji || null,\n      frase_padrao: o.frase_padrao || 'Confira essa oferta.',\n      preco_banco: Number(o.preco_atual),\n      preco_original: o.preco_original == null ? null : Number(o.preco_original),\n      desconto: o.desconto == null ? null : Number(o.desconto),\n      frete_gratis: Number(o.frete_gratis) === 1,\n      condicao: o.condicao,\n      score: Number(o.score),\n      status_original: o.status,\n      tentativas_antes: Number(o.tentativas),\n      link_produto: o.link_produto,\n      imagem_banco: o.imagem,\n      url_afiliado: o.url_afiliado || null,\n      precisa_aprovacao: precisaAprovacao,\n      dono: $('Montar SQL Lock').first().json.dono,\n    },\n  },\n];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000012",
+      "name": "Preparar Oferta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Camada 2 da concorrencia: reserva por status.\n// Se outra execucao pegou a mesma linha no meio, affectedRows volta 0.\n\nconst o = $input.first().json;\nconst dono = String(o.dono).replace(/'/g, '');\n\nconst sql =\n  \"UPDATE ofertas\\n\" +\n  \"SET status = 'PROCESSANDO',\\n\" +\n  \"    lock_owner = '\" +\n  dono +\n  \"',\\n\" +\n  '    tentativas = tentativas + 1\\n' +\n  'WHERE id = ' +\n  Number(o.oferta_id) +\n  \"\\n  AND status IN ('NOVO','APROVADO','ERRO')\";\n\nreturn [{ json: { sql } }];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000013",
+      "name": "Montar SQL Reserva",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000014",
+      "name": "Reservar Produto",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        800,
+        140
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "reserva-ok",
+              "leftValue": "={{ $json.affectedRows }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000015",
+      "name": "IF Reserva OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tem-link",
+              "leftValue": "={{ $('Preparar Oferta').first().json.url_afiliado }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000016",
+      "name": "IF Tem Link de Afiliado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.mercadolibre.com/items/{{ $('Preparar Oferta').first().json.produto_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000017",
+      "name": "Revalidar Item",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        -20
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "",
+          "name": "Mercado Livre OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Revalidacao imediatamente antes de publicar: preco, status e estoque.\n// Se o preco mudou mais que TOLERANCIA_PRECO, nao publica com numero velho.\n\nconst cfg = $('Montar Config').first().json;\nconst o = $('Preparar Oferta').first().json;\nconst item = $input.first().json;\n\nconst tolerancia = Number(cfg.TOLERANCIA_PRECO);\n\nconst r = { ...o, pode_publicar: false, motivo: null };\n\nif (!item || item.error || !item.id) {\n  r.motivo = 'Revalidacao falhou: /items/' + o.produto_id + ' nao respondeu item valido.';\n  return [{ json: r }];\n}\n\nif (item.status && item.status !== 'active') {\n  r.motivo = 'Anuncio nao esta ativo (status=' + item.status + ').';\n  return [{ json: r }];\n}\n\nif (typeof item.available_quantity === 'number' && item.available_quantity <= 0) {\n  r.motivo = 'Sem estoque disponivel.';\n  return [{ json: r }];\n}\n\nconst precoAgora = Number(item.price);\nif (!Number.isFinite(precoAgora) || precoAgora <= 0) {\n  r.motivo = 'Preco atual invalido na revalidacao.';\n  return [{ json: r }];\n}\n\nconst diferenca = Math.abs(precoAgora - o.preco_banco);\nif (diferenca > tolerancia) {\n  r.motivo =\n    'Preco mudou: banco R$ ' +\n    o.preco_banco.toFixed(2) +\n    ' -> agora R$ ' +\n    precoAgora.toFixed(2) +\n    ' (tolerancia R$ ' +\n    tolerancia.toFixed(2) +\n    ').';\n  return [{ json: r }];\n}\n\n// precos confirmados: dai pra frente usa SEMPRE o valor revalidado\nconst origAgora = Number(item.original_price);\nconst precoOriginal =\n  Number.isFinite(origAgora) && origAgora > precoAgora ? origAgora : null;\n\nconst desconto = precoOriginal\n  ? Math.round((1 - precoAgora / precoOriginal) * 100)\n  : null;\n\nlet imagem = o.imagem_banco;\nif (Array.isArray(item.pictures) && item.pictures.length) {\n  const u = item.pictures[0].secure_url || item.pictures[0].url;\n  if (u) imagem = String(u).replace('http://', 'https://');\n}\n\nr.pode_publicar = true;\nr.preco_final = precoAgora;\nr.preco_original_final = precoOriginal;\nr.desconto_final = desconto;\nr.imagem_final = imagem;\nr.frete_gratis_final = !!(item.shipping && item.shipping.free_shipping);\n\nreturn [{ json: r }];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000018",
+      "name": "Conferir Preco",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "pode",
+              "leftValue": "={{ $json.pode_publicar }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000019",
+      "name": "IF Pode Publicar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1800,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// A IA escreve UMA frase de apoio e nada mais.\n// Numero, preco e desconto sao montados pelo codigo - a IA nunca ve\n// valor nenhum, justamente pra nao ter como inventar numero errado.\n\nconst o = $input.first().json;\n\nconst cfg = $('Montar Config').first().json;\n\nconst prompt =\n  'Escreva UMA frase curta em portugues do Brasil recomendando este produto ' +\n  'para um canal de ofertas.\\n\\n' +\n  'Produto: ' +\n  String(o.titulo).slice(0, 160) +\n  '\\n' +\n  'Categoria: ' +\n  (o.categoria || 'geral') +\n  '\\n\\n' +\n  'REGRAS OBRIGATORIAS:\\n' +\n  '- No maximo 140 caracteres.\\n' +\n  '- NAO escreva numeros, precos, porcentagens, R$ ou qualquer valor.\\n' +\n  '- NAO use palavras de urgencia (corre, ultimas, imperdivel, agora, rapido).\\n' +\n  '- No maximo 1 emoji.\\n' +\n  '- Tom simples e direto, sem exagero publicitario.\\n' +\n  '- Responda SOMENTE a frase, sem aspas e sem explicacao.';\n\nreturn [\n  {\n    json: {\n      modelo: cfg.IA_MODELO || 'gpt-4o-mini',\n      prompt,\n      ia_ativa: cfg.IA_ATIVA === true || cfg.IA_ATIVA === 1,\n    },\n  },\n];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000020",
+      "name": "Montar Payload IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ia-ativa",
+              "leftValue": "={{ $json.ia_ativa }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000021",
+      "name": "IF IA Ativa?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2200,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.modelo, max_tokens: 120, temperature: 0.7, messages: [ { role: 'user', content: $json.prompt } ] }) }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000022",
+      "name": "Gerar Frase IA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        -180
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "openAiApi": {
+          "id": "",
+          "name": "OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Valida a frase da IA e devolve um payload NEUTRO (sem formatacao).\n// Quem formata por plataforma e o node Formatar Por Destino.\n// Reprova e cai na frase_padrao se vier:\n//   numero | R$ | % | termo de urgencia | >3 emojis | >200 chars\n\nconst o = $('Conferir Preco').first().json;\n\n// ---- 1. extrai a frase, se a IA rodou ---------------------------------\nlet frase = null;\nlet origemFrase = 'padrao';\nconst entrada = $input.first().json;\n\nif (entrada && Array.isArray(entrada.choices) && entrada.choices.length) {\n  const bruto = entrada.choices[0].message && entrada.choices[0].message.content;\n  if (bruto) {\n    frase = String(bruto).trim().replace(/^[\"']|[\"']$/g, '');\n    origemFrase = 'ia';\n  }\n}\n\n// ---- 2. valida ---------------------------------------------------------\nconst URGENCIA = /\\b(corre|corra|ultimas?|ultima|imperdivel|imperd[ií]vel|agora|r[áa]pido|voando|aproveite|n[ãa]o perca|acaba|esgotando|relampago|rel[âa]mpago)\\b/i;\nconst EMOJI = /[\\u{1F300}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{FE0F}\\u{1F000}-\\u{1F2FF}]/gu;\n\nfunction reprovar(f) {\n  if (!f) return 'vazia';\n  if (f.length > 200) return 'maior que 200 caracteres';\n  if (/\\d/.test(f)) return 'contem numero';\n  if (/R\\$|\\breais\\b/i.test(f)) return 'contem preco';\n  if (/%|por\\s*cento/i.test(f)) return 'contem percentual';\n  if (URGENCIA.test(f)) return 'contem termo de urgencia';\n  const emojis = f.match(EMOJI);\n  if (emojis && emojis.length > 3) return 'mais de 3 emojis';\n  return null;\n}\n\nconst motivoReprova = reprovar(frase);\nif (motivoReprova) {\n  console.log('Frase da IA reprovada (' + motivoReprova + '): ' + JSON.stringify(frase));\n  frase = o.frase_padrao;\n  origemFrase = 'padrao';\n}\n\n// ---- 3. render canonico em HTML ---------------------------------------\n// Serve para a previa do admin (sempre Telegram) e para gravar em\n// ofertas.mensagem como versao legivel. Os outros formatos saem do\n// Formatar Por Destino, a partir das colunas + desta frase.\nfunction brl(v) {\n  return 'R$ ' + Number(v).toFixed(2).replace('.', ',');\n}\nfunction htmlEsc(s) {\n  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n}\n\nconst emoji = o.emoji ? o.emoji + ' ' : '';\nlet titulo = String(o.titulo).trim();\nif (titulo.length > 95) titulo = titulo.slice(0, 92).trimEnd() + '...';\n\nconst l = [];\nl.push(o.desconto_final != null\n  ? '<b>' + emoji + o.desconto_final + '% OFF</b>'\n  : '<b>' + emoji + (o.categoria || 'Oferta') + '</b>');\nl.push('');\nl.push('<b>' + htmlEsc(titulo) + '</b>');\nl.push('');\nif (o.preco_original_final != null) l.push('De <s>' + brl(o.preco_original_final) + '</s>');\nl.push('Por <b>' + brl(o.preco_final) + '</b>');\nif (o.frete_gratis_final) l.push('Frete gratis');\nl.push('');\nl.push(htmlEsc(frase));\nl.push('');\nl.push('<a href=\"' + o.url_afiliado + '\">Ver no Mercado Livre</a>');\nl.push('');\nl.push('<i>Preco e estoque podem mudar a qualquer momento.</i>');\n\nreturn [\n  {\n    json: {\n      ...o,\n      frase,\n      titulo_curto: titulo,\n      origem_frase: origemFrase,\n      motivo_reprova: motivoReprova,\n      mensagem_html: l.join('\\n'),\n    },\n  },\n];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000023",
+      "name": "Validar Frase",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/\\u0000/g, '');\n  return \"'\" + s + \"'\";\n}\n\nconst o = $input.first().json;\n\n// grava a mensagem e sincroniza o preco revalidado na linha\nconst sql =\n  'UPDATE ofertas SET\\n' +\n  '  frase = ' +\n  esc(o.frase) +\n  ',\\n' +\n  '  mensagem = ' +\n  esc(o.mensagem_html) +\n  ',\\n' +\n  '  preco_atual = ' +\n  Number(o.preco_final).toFixed(2) +\n  ',\\n' +\n  '  preco_original = ' +\n  (o.preco_original_final == null\n    ? 'NULL'\n    : Number(o.preco_original_final).toFixed(2)) +\n  ',\\n' +\n  '  desconto = ' +\n  (o.desconto_final == null ? 'NULL' : Number(o.desconto_final)) +\n  ',\\n' +\n  '  imagem = ' +\n  esc(o.imagem_final) +\n  '\\n' +\n  'WHERE id = ' +\n  Number(o.oferta_id);\n\nreturn [{ json: { ...o, sql } }];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000024",
+      "name": "Montar SQL Mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2820,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000025",
+      "name": "Salvar Mensagem",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        3020,
+        -100
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "precisa-aprovacao",
+              "leftValue": "={{ $('Validar Frase').first().json.precisa_aprovacao }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000026",
+      "name": "IF Precisa Aprovacao?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3220,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $('Montar Config').first().json.TELEGRAM_CHAT_ADMIN }}",
+        "file": "={{ $('Validar Frase').first().json.imagem_final }}",
+        "additionalFields": {
+          "caption": "=PREVIA (nao publicada)\nscore {{ $('Validar Frase').first().json.score }} | frase: {{ $('Validar Frase').first().json.origem_frase }}\n\n{{ $('Validar Frase').first().json.mensagem_html }}",
+          "parse_mode": "HTML"
+        },
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "APROVAR",
+                    "additionalFields": {
+                      "url": "={{ $('Montar Config').first().json.N8N_BASE_URL }}/webhook/aprovacao?id={{ $('Validar Frase').first().json.oferta_id }}&acao=aprovar&token={{ $('Montar Config').first().json.APROVACAO_SECRET }}"
+                    }
+                  },
+                  {
+                    "text": "REJEITAR",
+                    "additionalFields": {
+                      "url": "={{ $('Montar Config').first().json.N8N_BASE_URL }}/webhook/aprovacao?id={{ $('Validar Frase').first().json.oferta_id }}&acao=rejeitar&token={{ $('Montar Config').first().json.APROVACAO_SECRET }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "id": "bb000000-0000-4000-8000-000000000027",
+      "name": "Telegram Previa Admin",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3420,
+        -220
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot Ofertas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE ofertas\nSET status = 'AGUARDANDO', lock_owner = NULL\nWHERE id = {{ $('Validar Frase').first().json.oferta_id }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000028",
+      "name": "Marcar Aguardando",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        3620,
+        -220
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $json.destino }}",
+        "file": "={{ $json.imagem }}",
+        "additionalFields": {
+          "caption": "={{ $json.mensagem }}",
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "bb000000-0000-4000-8000-000000000029",
+      "name": "Telegram Publicar Canal",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4240,
+        -40
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot Ofertas"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sqlOferta }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000030",
+      "name": "Registrar Envio",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        5040,
+        60
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO logs_execucao (workflow, etapa, status, produto_id, mensagem)\nVALUES ('B-PUBLICADOR', 'publicar',\n        '{{ $('Consolidar Envios').first().json.erros > 0 ? 'AVISO' : 'OK' }}',\n        '{{ $('Validar Frase').first().json.produto_id }}',\n        'oferta {{ $('Consolidar Envios').first().json.oferta_id }}: {{ $('Consolidar Envios').first().json.resumo }}')",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000031",
+      "name": "Log Envio",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        5240,
+        60
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "m1",
+              "name": "motivo",
+              "value": "Produto sem link de afiliado cadastrado em links_afiliados.",
+              "type": "string"
+            },
+            {
+              "id": "m2",
+              "name": "sem_retry",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000032",
+      "name": "Motivo Sem Link",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1400,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "m1",
+              "name": "motivo",
+              "value": "={{ $json.motivo }}",
+              "type": "string"
+            },
+            {
+              "id": "m2",
+              "name": "sem_retry",
+              "value": false,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000033",
+      "name": "Motivo Revalidacao",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2000,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "m1",
+              "name": "motivo",
+              "value": "Outra execucao reservou esta oferta antes (affectedRows = 0).",
+              "type": "string"
+            },
+            {
+              "id": "m2",
+              "name": "sem_retry",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000034",
+      "name": "Motivo Reserva Perdida",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Retry escalonado: 1a falha +5 min, 2a +15 min, 3a para de tentar\n// (o SELECT do publicador exige tentativas < MAX_TENTATIVAS).\n// sem_retry = true vira DESCARTADO direto, sem nova tentativa.\n\nfunction esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/[\\r\\n]+/g, ' ')\n    .slice(0, 240);\n  return \"'\" + s + \"'\";\n}\n\nconst o = $('Preparar Oferta').first().json;\nconst cfg = $('Montar Config').first().json;\nconst entrada = $input.first().json;\n\nconst motivo = entrada.motivo || 'Falha nao descrita.';\nconst semRetry = entrada.sem_retry === true;\nconst maxTent = parseInt(cfg.MAX_TENTATIVAS, 10) || 3;\n\n// Reservar Produto ja fez tentativas = tentativas + 1\nconst tentativaAtual = Number(o.tentativas_antes) + 1;\n\nlet status;\nlet proxima;\n\nif (semRetry) {\n  status = 'DESCARTADO';\n  proxima = 'NULL';\n} else if (tentativaAtual >= maxTent) {\n  status = 'ERRO';\n  proxima = 'NULL';\n} else {\n  status = 'ERRO';\n  const minutos = tentativaAtual === 1 ? 5 : 15;\n  proxima = 'DATE_ADD(NOW(), INTERVAL ' + minutos + ' MINUTE)';\n}\n\nconst sql =\n  'UPDATE ofertas SET\\n' +\n  \"  status = '\" +\n  status +\n  \"',\\n\" +\n  '  motivo = ' +\n  esc(motivo) +\n  ',\\n' +\n  '  proxima_tentativa = ' +\n  proxima +\n  ',\\n' +\n  '  lock_owner = NULL\\n' +\n  'WHERE id = ' +\n  Number(o.oferta_id);\n\nreturn [\n  {\n    json: {\n      sql,\n      status,\n      motivo,\n      tentativa: tentativaAtual,\n      max: maxTent,\n      produto_id: o.produto_id,\n      oferta_id: o.oferta_id,\n    },\n  },\n];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000035",
+      "name": "Montar SQL Falha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000036",
+      "name": "Registrar Falha",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        2620,
+        220
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO logs_execucao (workflow, etapa, status, produto_id, mensagem)\nVALUES ('B-PUBLICADOR', 'falha', 'ERRO',\n        '{{ $json.produto_id }}',\n        'oferta {{ $json.oferta_id }} -> {{ $json.status }} (tentativa {{ $json.tentativa }}/{{ $json.max }}): {{ $json.motivo }}')",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000037",
+      "name": "Log Falha",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        2820,
+        220
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Montar Config').first().json.TELEGRAM_CHAT_ADMIN }}",
+        "text": "=Publicador falhou\n\noferta: {{ $('Montar SQL Falha').first().json.oferta_id }}\nproduto: {{ $('Montar SQL Falha').first().json.produto_id }}\nnovo status: {{ $('Montar SQL Falha').first().json.status }}\ntentativa: {{ $('Montar SQL Falha').first().json.tentativa }}/{{ $('Montar SQL Falha').first().json.max }}\n\nmotivo: {{ $('Montar SQL Falha').first().json.motivo }}",
+        "additionalFields": {
+          "disable_notification": true
+        }
+      },
+      "id": "bb000000-0000-4000-8000-000000000038",
+      "name": "Alertar Admin",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3020,
+        220
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot Ofertas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=DELETE FROM locks_execucao\nWHERE nome = 'publicador'\n  AND dono = '{{ $('Montar SQL Lock').first().json.dono }}'",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000039",
+      "name": "Liberar Lock",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        5460,
+        160
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO logs_execucao (workflow, etapa, status, mensagem)\nVALUES ('B-PUBLICADOR', 'selecionar', 'AVISO',\n        'Fila vazia: nenhuma oferta passou no SELECT (score, link, janela de dias).')",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000040",
+      "name": "Log Fila Vazia",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        320
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, nome, plataforma, destino, formato\nFROM destinos\nWHERE ativo = 1\nORDER BY ordem, id",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000041",
+      "name": "Carregar Destinos",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        3420,
+        60
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tem-destino",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000042",
+      "name": "IF Tem Destino?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3620,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Um item por destino ativo, com a mensagem ja renderizada no formato\n// que aquela plataforma entende. Adicionar WhatsApp amanha = adicionar\n// um render aqui + o node de envio; o resto do fluxo nao muda.\n\nconst o = $('Validar Frase').first().json;\nconst cfg = $('Montar Config').first().json;\nconst captionMax = parseInt(cfg.CAPTION_MAX, 10) || 1024;\n\nconst destinos = $input.all().map((i) => i.json).filter((d) => d && d.id);\n\nfunction brl(v) {\n  return 'R$ ' + Number(v).toFixed(2).replace('.', ',');\n}\n\n// --- html: Telegram parse_mode HTML -----------------------------------\nfunction renderHtml() {\n  return o.mensagem_html;\n}\n\n// --- markdown_wa: *negrito* _italico_ ~riscado~, link cru -------------\n// O WhatsApp nao tem ancora com texto: a URL vai sozinha na linha.\nfunction renderWa() {\n  const emoji = o.emoji ? o.emoji + ' ' : '';\n  const l = [];\n  l.push(o.desconto_final != null\n    ? '*' + emoji + o.desconto_final + '% OFF*'\n    : '*' + emoji + (o.categoria || 'Oferta') + '*');\n  l.push('');\n  l.push('*' + o.titulo_curto + '*');\n  l.push('');\n  if (o.preco_original_final != null) l.push('De ~' + brl(o.preco_original_final) + '~');\n  l.push('Por *' + brl(o.preco_final) + '*');\n  if (o.frete_gratis_final) l.push('Frete gratis');\n  l.push('');\n  l.push(o.frase);\n  l.push('');\n  l.push(o.url_afiliado);\n  l.push('');\n  l.push('_Preco e estoque podem mudar a qualquer momento._');\n  return l.join('\\n');\n}\n\n// --- texto: sem formatacao nenhuma ------------------------------------\nfunction renderTexto() {\n  const l = [];\n  l.push(o.desconto_final != null\n    ? o.desconto_final + '% OFF'\n    : (o.categoria || 'Oferta'));\n  l.push('');\n  l.push(o.titulo_curto);\n  l.push('');\n  if (o.preco_original_final != null) l.push('De ' + brl(o.preco_original_final));\n  l.push('Por ' + brl(o.preco_final));\n  if (o.frete_gratis_final) l.push('Frete gratis');\n  l.push('');\n  l.push(o.frase);\n  l.push('');\n  l.push(o.url_afiliado);\n  return l.join('\\n');\n}\n\nconst RENDER = { html: renderHtml, markdown_wa: renderWa, texto: renderTexto };\n\n// So o Telegram tem node de envio montado neste workflow.\nconst IMPLEMENTADAS = ['telegram'];\n\nreturn destinos.map((d) => {\n  const fn = RENDER[d.formato] || renderTexto;\n  let msg = fn();\n\n  if (msg.length > captionMax) {\n    msg = msg.slice(0, captionMax - 40).trimEnd() + '...\\n\\n' + o.url_afiliado;\n    console.log('Mensagem truncada para ' + d.nome + ' (limite ' + captionMax + ').');\n  }\n\n  return {\n    json: {\n      oferta_id: o.oferta_id,\n      destino_id: Number(d.id),\n      destino_nome: d.nome,\n      plataforma: d.plataforma,\n      destino: d.destino,\n      formato: d.formato,\n      implementado: IMPLEMENTADAS.includes(d.plataforma),\n      imagem: o.imagem_final,\n      mensagem: msg,\n      tamanho: msg.length,\n    },\n  };\n});"
+      },
+      "id": "bb000000-0000-4000-8000-000000000043",
+      "name": "Formatar Por Destino",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3820,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "implementado",
+              "leftValue": "={{ $json.implementado }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000044",
+      "name": "IF Plataforma Implementada?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4020,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Le o resultado do envio. Com onError continueRegularOutput, a falha\n// chega como item normal com a chave error - por isso da pra registrar\n// destino por destino em vez de derrubar a execucao toda.\n\nconst d = $('Formatar Por Destino').item.json;\nconst r = $json;\n\nconst falhou = !!(r && r.error);\nlet erro = null;\nif (falhou) {\n  const e = r.error;\n  erro = String((e && (e.message || e.description)) || e).slice(0, 480);\n}\n\nreturn {\n  json: {\n    oferta_id: d.oferta_id,\n    destino_id: d.destino_id,\n    destino_nome: d.destino_nome,\n    status: falhou ? 'ERRO' : 'OK',\n    erro,\n  },\n};"
+      },
+      "id": "bb000000-0000-4000-8000-000000000045",
+      "name": "Marcar Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4440,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Destino ativo numa plataforma que ainda nao tem node de envio aqui.\n// Registra como ERRO para aparecer em vw_envios_por_destino, em vez de\n// sumir em silencio.\n\nconst d = $json;\n\nreturn {\n  json: {\n    oferta_id: d.oferta_id,\n    destino_id: d.destino_id,\n    destino_nome: d.destino_nome,\n    status: 'ERRO',\n    erro: 'Plataforma ' + d.plataforma + ' ativa em destinos mas sem node de envio no publicador.',\n  },\n};"
+      },
+      "id": "bb000000-0000-4000-8000-000000000046",
+      "name": "Marcar Nao Implementado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4240,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Consolida o fan-out: um INSERT com todas as linhas de envios_destino\n// e decide o status final da oferta.\n// ofertas.status = ENVIADO se pelo menos um destino aceitou.\n\nfunction esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/[\\r\\n]+/g, ' ')\n    .slice(0, 480);\n  return \"'\" + s + \"'\";\n}\n\nconst itens = $input.all().map((i) => i.json);\n\nif (!itens.length) {\n  throw new Error('Consolidar Envios recebeu zero itens - nenhum destino processado.');\n}\n\nconst ofertaId = Number(itens[0].oferta_id);\nconst ok = itens.filter((i) => i.status === 'OK');\nconst erro = itens.filter((i) => i.status !== 'OK');\n\nconst linhas = itens.map(\n  (i) =>\n    '(' +\n    [Number(i.oferta_id), Number(i.destino_id), esc(i.status), esc(i.erro)].join(', ') +\n    ')'\n);\n\nconst sqlEnvios =\n  'INSERT INTO envios_destino (oferta_id, destino_id, status, erro)\\nVALUES\\n  ' +\n  linhas.join(',\\n  ') +\n  '\\nON DUPLICATE KEY UPDATE\\n' +\n  '  status = VALUES(status),\\n' +\n  '  erro = VALUES(erro),\\n' +\n  '  enviado_em = NOW()';\n\nconst algumOk = ok.length > 0;\n\nconst resumo =\n  ok.length + ' destino(s) ok, ' + erro.length + ' com erro' +\n  (erro.length ? ': ' + erro.map((e) => e.destino_nome).join(', ') : '');\n\nconst sqlOferta = algumOk\n  ? \"UPDATE ofertas SET\\n\" +\n    \"  status = 'ENVIADO',\\n\" +\n    '  enviado_em = NOW(),\\n' +\n    '  lock_owner = NULL,\\n' +\n    '  motivo = ' + (erro.length ? esc('parcial: ' + resumo) : 'NULL') + ',\\n' +\n    '  proxima_tentativa = NULL\\n' +\n    'WHERE id = ' + ofertaId\n  : \"UPDATE ofertas SET\\n\" +\n    \"  status = 'ERRO',\\n\" +\n    '  motivo = ' + esc('nenhum destino aceitou: ' + resumo) + ',\\n' +\n    '  proxima_tentativa = DATE_ADD(NOW(), INTERVAL 15 MINUTE),\\n' +\n    '  lock_owner = NULL\\n' +\n    'WHERE id = ' + ofertaId;\n\nreturn [\n  {\n    json: {\n      sqlEnvios,\n      sqlOferta,\n      oferta_id: ofertaId,\n      algum_ok: algumOk,\n      total: itens.length,\n      ok: ok.length,\n      erros: erro.length,\n      resumo,\n    },\n  },\n];"
+      },
+      "id": "bb000000-0000-4000-8000-000000000047",
+      "name": "Consolidar Envios",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4640,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sqlEnvios }}",
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000048",
+      "name": "Gravar Envios",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        4840,
+        60
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "m1",
+              "name": "motivo",
+              "value": "Nenhum destino ativo na tabela destinos.",
+              "type": "string"
+            },
+            {
+              "id": "m2",
+              "name": "sem_retry",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bb000000-0000-4000-8000-000000000049",
+      "name": "Motivo Sem Destino",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3820,
+        240
+      ]
+    }
+  ],
+  "connections": {
+    "Agendador": {
+      "main": [
+        [
+          {
+            "node": "Carregar Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Carregar Config": {
+      "main": [
+        [
+          {
+            "node": "Montar Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Config": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Lock": {
+      "main": [
+        [
+          {
+            "node": "Adquirir Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Adquirir Lock": {
+      "main": [
+        [
+          {
+            "node": "Checar Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checar Lock": {
+      "main": [
+        [
+          {
+            "node": "IF Sou o Dono?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Sou o Dono?": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Selecionar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Lock Ocupado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Selecionar": {
+      "main": [
+        [
+          {
+            "node": "Selecionar Melhor Oferta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Selecionar Melhor Oferta": {
+      "main": [
+        [
+          {
+            "node": "IF Tem Oferta?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Tem Oferta?": {
+      "main": [
+        [
+          {
+            "node": "Preparar Oferta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Fila Vazia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Fila Vazia": {
+      "main": [
+        [
+          {
+            "node": "Liberar Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Oferta": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Reserva",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Reserva": {
+      "main": [
+        [
+          {
+            "node": "Reservar Produto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reservar Produto": {
+      "main": [
+        [
+          {
+            "node": "IF Reserva OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Reserva OK?": {
+      "main": [
+        [
+          {
+            "node": "IF Tem Link de Afiliado?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo Reserva Perdida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Tem Link de Afiliado?": {
+      "main": [
+        [
+          {
+            "node": "Revalidar Item",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo Sem Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revalidar Item": {
+      "main": [
+        [
+          {
+            "node": "Conferir Preco",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferir Preco": {
+      "main": [
+        [
+          {
+            "node": "IF Pode Publicar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Pode Publicar?": {
+      "main": [
+        [
+          {
+            "node": "Montar Payload IA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo Revalidacao",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Payload IA": {
+      "main": [
+        [
+          {
+            "node": "IF IA Ativa?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF IA Ativa?": {
+      "main": [
+        [
+          {
+            "node": "Gerar Frase IA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validar Frase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar Frase IA": {
+      "main": [
+        [
+          {
+            "node": "Validar Frase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Mensagem": {
+      "main": [
+        [
+          {
+            "node": "Salvar Mensagem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salvar Mensagem": {
+      "main": [
+        [
+          {
+            "node": "IF Precisa Aprovacao?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Precisa Aprovacao?": {
+      "main": [
+        [
+          {
+            "node": "Telegram Previa Admin",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Carregar Destinos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Previa Admin": {
+      "main": [
+        [
+          {
+            "node": "Marcar Aguardando",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar Aguardando": {
+      "main": [
+        [
+          {
+            "node": "Liberar Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Publicar Canal": {
+      "main": [
+        [
+          {
+            "node": "Marcar Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar Envio": {
+      "main": [
+        [
+          {
+            "node": "Log Envio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Envio": {
+      "main": [
+        [
+          {
+            "node": "Liberar Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Motivo Sem Link": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Motivo Revalidacao": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Motivo Reserva Perdida": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Falha": {
+      "main": [
+        [
+          {
+            "node": "Registrar Falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar Falha": {
+      "main": [
+        [
+          {
+            "node": "Log Falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Falha": {
+      "main": [
+        [
+          {
+            "node": "Alertar Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alertar Admin": {
+      "main": [
+        [
+          {
+            "node": "Liberar Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Lock Ocupado": {
+      "main": [
+        []
+      ]
+    },
+    "Validar Frase": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Mensagem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Carregar Destinos": {
+      "main": [
+        [
+          {
+            "node": "IF Tem Destino?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Tem Destino?": {
+      "main": [
+        [
+          {
+            "node": "Formatar Por Destino",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo Sem Destino",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Motivo Sem Destino": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Por Destino": {
+      "main": [
+        [
+          {
+            "node": "IF Plataforma Implementada?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Plataforma Implementada?": {
+      "main": [
+        [
+          {
+            "node": "Telegram Publicar Canal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar Nao Implementado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar Resultado": {
+      "main": [
+        [
+          {
+            "node": "Consolidar Envios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar Nao Implementado": {
+      "main": [
+        [
+          {
+            "node": "Consolidar Envios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidar Envios": {
+      "main": [
+        [
+          {
+            "node": "Gravar Envios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar Envios": {
+      "main": [
+        [
+          {
+            "node": "Registrar Envio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {}
+}

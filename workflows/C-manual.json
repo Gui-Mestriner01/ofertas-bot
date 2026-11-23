@@ -1,0 +1,308 @@
+{
+  "name": "C - Entrada Manual",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Cadastrar oferta manual",
+        "formDescription": "Cola o link de afiliado que voce gerou no painel. Entra na fila com prioridade maxima.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Link ou ID do produto",
+              "placeholder": "https://produto.mercadolivre.com.br/MLB-123456789-... ou MLB123456789",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Link de afiliado",
+              "placeholder": "https://mercadolivre.com/sec/...",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Categoria",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "GAMES"
+                  },
+                  {
+                    "option": "INFORMATICA"
+                  },
+                  {
+                    "option": "CELULARES"
+                  },
+                  {
+                    "option": "ELETRONICOS"
+                  },
+                  {
+                    "option": "CASA"
+                  },
+                  {
+                    "option": "FERRAMENTAS"
+                  },
+                  {
+                    "option": "ACESSORIOS"
+                  }
+                ]
+              },
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000001",
+      "name": "Formulario",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -800,
+        300
+      ],
+      "webhookId": "cc111111-0000-4000-8000-000000000001"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aceita URL completa do ML ou o id cru. O id aparece na URL em duas\n// formas: /MLB-123456789-titulo (com hifen) e /p/MLB123456789.\n\nconst f = $input.first().json;\n\nconst bruto = String(f['Link ou ID do produto'] || '').trim();\nconst urlAfiliado = String(f['Link de afiliado'] || '').trim();\nconst categoria = f['Categoria'] ? String(f['Categoria']).trim() : null;\n\nif (!urlAfiliado.startsWith('http')) {\n  throw new Error('O link de afiliado precisa comecar com http. Veio: ' + urlAfiliado);\n}\n\nlet id = null;\n\nconst direto = bruto.match(/^(MLB\\d+)$/i);\nconst comHifen = bruto.match(/MLB-(\\d+)/i);\nconst semHifen = bruto.match(/MLB(\\d{6,})/i);\n\nif (direto) id = direto[1].toUpperCase();\nelse if (comHifen) id = 'MLB' + comHifen[1];\nelse if (semHifen) id = 'MLB' + semHifen[1];\n\nif (!id) {\n  throw new Error(\n    'Nao achei um ID MLB em: ' +\n      bruto +\n      '. Cole a URL do anuncio ou o ID (ex: MLB123456789).'\n  );\n}\n\nreturn [{ json: { produto_id: id, url_afiliado: urlAfiliado, categoria } }];"
+      },
+      "id": "cc000000-0000-4000-8000-000000000002",
+      "name": "Extrair ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.mercadolibre.com/items/{{ $json.produto_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000003",
+      "name": "Buscar Item",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -400,
+        300
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "",
+          "name": "Mercado Livre OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT id FROM categorias WHERE nome = '{{ $('Extrair ID').first().json.categoria || 'ACESSORIOS' }}' LIMIT 1",
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000004",
+      "name": "Resolver Categoria",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -200,
+        300
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Entrada manual fura a fila: score 100 e status APROVADO, entao o\n// ORDER BY score DESC do publicador pega essa linha primeiro e,\n// por ja vir APROVADO, nao passa de novo pela previa de aprovacao.\n\nfunction esc(v) {\n  if (v === null || v === undefined) return 'NULL';\n  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';\n  const s = String(v)\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\")\n    .replace(/\\u0000/g, '')\n    .replace(/[\\r\\n]+/g, ' ')\n    .trim();\n  return \"'\" + s + \"'\";\n}\n\nconst entrada = $('Extrair ID').first().json;\nconst item = $('Buscar Item').first().json;\nconst catRow = $('Resolver Categoria').first().json;\nconst categoriaId = catRow && catRow.id ? Number(catRow.id) : null;\n\nif (!item || !item.id) {\n  throw new Error('A API do ML nao devolveu o item ' + entrada.produto_id);\n}\n\nconst preco = Number(item.price);\nif (!Number.isFinite(preco) || preco <= 0) {\n  throw new Error('Preco invalido no item ' + item.id);\n}\n\nconst orig = Number(item.original_price);\nconst precoOriginal = Number.isFinite(orig) && orig > preco ? orig : null;\nconst desconto = precoOriginal\n  ? Math.round((1 - preco / precoOriginal) * 100)\n  : null;\n\nlet imagem = null;\nif (Array.isArray(item.pictures) && item.pictures.length) {\n  imagem = String(item.pictures[0].secure_url || item.pictures[0].url || '').replace(\n    'http://',\n    'https://'\n  );\n}\nif (!imagem && item.thumbnail) {\n  imagem = String(item.thumbnail)\n    .replace('http://', 'https://')\n    .replace(/-I\\.jpg$/, '-O.jpg');\n}\nif (!imagem) throw new Error('Item sem imagem utilizavel: ' + item.id);\n\nconst detalhe = { manual: true, total: 100 };\n\nconst sqlLink =\n  'INSERT INTO links_afiliados (produto_id, url_afiliado, observacao)\\n' +\n  'VALUES (' +\n  esc(item.id) +\n  ', ' +\n  esc(entrada.url_afiliado) +\n  \", 'cadastro manual via workflow C')\\n\" +\n  'ON DUPLICATE KEY UPDATE url_afiliado = VALUES(url_afiliado)';\n\nconst sqlOferta =\n  'INSERT INTO ofertas\\n' +\n  '  (produto_id, titulo, categoria_id, preco_atual, preco_original, desconto,\\n' +\n  '   frete_gratis, condicao, catalogo, vendidos, avaliacao, link_produto,\\n' +\n  '   imagem, score, score_detalhe, status)\\n' +\n  'VALUES (' +\n  [\n    esc(item.id),\n    esc(String(item.title || '').slice(0, 250)),\n    esc(categoriaId),\n    preco.toFixed(2),\n    precoOriginal == null ? 'NULL' : precoOriginal.toFixed(2),\n    esc(desconto),\n    item.shipping && item.shipping.free_shipping ? '1' : '0',\n    esc(item.condition || null),\n    item.catalog_listing || item.catalog_product_id ? '1' : '0',\n    typeof item.sold_quantity === 'number' ? String(item.sold_quantity) : 'NULL',\n    'NULL',\n    esc(String(item.permalink || '').slice(0, 490)),\n    esc(imagem.slice(0, 490)),\n    '100',\n    esc(JSON.stringify(detalhe)),\n    \"'APROVADO'\",\n  ].join(', ') +\n  ')\\n' +\n  'ON DUPLICATE KEY UPDATE\\n' +\n  \"  status = 'APROVADO',\\n\" +\n  '  score = 100,\\n' +\n  '  tentativas = 0,\\n' +\n  '  proxima_tentativa = NULL,\\n' +\n  '  motivo = NULL,\\n' +\n  '  lock_owner = NULL';\n\nreturn [\n  {\n    json: {\n      produto_id: item.id,\n      titulo: item.title,\n      preco: preco,\n      desconto,\n      sqlLink,\n      sqlOferta,\n    },\n  },\n];"
+      },
+      "id": "cc000000-0000-4000-8000-000000000005",
+      "name": "Montar SQL Manual",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sqlLink }}",
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000006",
+      "name": "Gravar Link Afiliado",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        200,
+        300
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $('Montar SQL Manual').first().json.sqlOferta }}",
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000007",
+      "name": "Gravar Oferta",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        300
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO logs_execucao (workflow, etapa, status, produto_id, mensagem)\nVALUES ('C-MANUAL', 'cadastro', 'OK',\n        '{{ $('Montar SQL Manual').first().json.produto_id }}',\n        'Entrada manual aprovada com score 100')",
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000008",
+      "name": "Log Manual",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        600,
+        300
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=Oferta cadastrada e na frente da fila.\n\nproduto: {{ $('Montar SQL Manual').first().json.produto_id }}\ntitulo: {{ $('Montar SQL Manual').first().json.titulo }}\npreco: R$ {{ $('Montar SQL Manual').first().json.preco }}\n\nO publicador manda no proximo horario agendado.",
+        "options": {}
+      },
+      "id": "cc000000-0000-4000-8000-000000000009",
+      "name": "Responder",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Formulario": {
+      "main": [
+        [
+          {
+            "node": "Extrair ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair ID": {
+      "main": [
+        [
+          {
+            "node": "Buscar Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Item": {
+      "main": [
+        [
+          {
+            "node": "Resolver Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolver Categoria": {
+      "main": [
+        [
+          {
+            "node": "Montar SQL Manual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar SQL Manual": {
+      "main": [
+        [
+          {
+            "node": "Gravar Link Afiliado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar Link Afiliado": {
+      "main": [
+        [
+          {
+            "node": "Gravar Oferta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar Oferta": {
+      "main": [
+        [
+          {
+            "node": "Log Manual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Manual": {
+      "main": [
+        [
+          {
+            "node": "Responder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "pinData": {}
+}

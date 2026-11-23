@@ -1,0 +1,271 @@
+{
+  "name": "E - Aprovacao",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aprovacao",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "ee000000-0000-4000-8000-000000000001",
+      "name": "Webhook Aprovacao",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        300
+      ],
+      "webhookId": "ee111111-0000-4000-8000-000000000001"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT valor FROM config WHERE chave = 'APROVACAO_SECRET' LIMIT 1",
+        "options": {}
+      },
+      "id": "ee000000-0000-4000-8000-000000000002",
+      "name": "Buscar Secret",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        -600,
+        300
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Valida token e parametros. O webhook fica exposto, entao nada daqui\n// entra em SQL sem passar por Number() ou por lista fechada.\n\nconst q = $('Webhook Aprovacao').first().json.query || {};\nconst linha = $input.first().json || {};\nconst secretEsperado = String(linha.valor || '');\n\nconst id = Number(q.id);\nconst acao = String(q.acao || '').toLowerCase();\nconst token = String(q.token || '');\n\nif (!secretEsperado) {\n  return [{ json: { ok: false, http: 500, texto: 'APROVACAO_SECRET nao esta preenchido na tabela config.' } }];\n}\n\n// comparacao de tamanho fixo para nao vazar o segredo pelo tempo de resposta\nfunction iguais(a, b) {\n  if (a.length !== b.length) return false;\n  let d = 0;\n  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);\n  return d === 0;\n}\n\nif (!iguais(token, secretEsperado)) {\n  return [{ json: { ok: false, http: 403, texto: 'Token invalido.' } }];\n}\n\nif (!Number.isInteger(id) || id <= 0) {\n  return [{ json: { ok: false, http: 400, texto: 'Parametro id invalido.' } }];\n}\n\nif (acao !== 'aprovar' && acao !== 'rejeitar') {\n  return [{ json: { ok: false, http: 400, texto: \"Parametro acao deve ser 'aprovar' ou 'rejeitar'.\" } }];\n}\n\n// Aprovar devolve a oferta para a fila com o orcamento de retry zerado:\n// as tentativas gastas na previa nao contam para a publicacao de verdade.\nconst sql =\n  acao === 'aprovar'\n    ? 'UPDATE ofertas SET\\n' +\n      \"  status = 'APROVADO',\\n\" +\n      '  tentativas = 0,\\n' +\n      '  proxima_tentativa = NULL,\\n' +\n      '  motivo = NULL,\\n' +\n      '  lock_owner = NULL\\n' +\n      'WHERE id = ' +\n      id +\n      \"\\n  AND status = 'AGUARDANDO'\"\n    : 'UPDATE ofertas SET\\n' +\n      \"  status = 'REJEITADO',\\n\" +\n      \"  motivo = 'Rejeitado manualmente na previa',\\n\" +\n      '  proxima_tentativa = NULL,\\n' +\n      '  lock_owner = NULL\\n' +\n      'WHERE id = ' +\n      id +\n      \"\\n  AND status = 'AGUARDANDO'\";\n\nreturn [{ json: { ok: true, id, acao, sql } }];"
+      },
+      "id": "ee000000-0000-4000-8000-000000000003",
+      "name": "Validar Requisicao",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "valido",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ee000000-0000-4000-8000-000000000004",
+      "name": "IF Requisicao Valida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "ee000000-0000-4000-8000-000000000005",
+      "name": "Aplicar Decisao",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        0,
+        220
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// affectedRows = 0 quer dizer que a oferta nao estava em AGUARDANDO:\n// ou o botao foi clicado duas vezes, ou o estado mudou no meio.\n\nconst r = $input.first().json || {};\nconst v = $('Validar Requisicao').first().json;\n\nconst afetadas = Number(r.affectedRows);\nconst aplicou = Number.isFinite(afetadas) ? afetadas >= 1 : true;\n\nconst titulo = aplicou\n  ? v.acao === 'aprovar'\n    ? 'Oferta aprovada'\n    : 'Oferta rejeitada'\n  : 'Nada mudou';\n\nconst detalhe = aplicou\n  ? v.acao === 'aprovar'\n    ? 'Ela volta para a fila e sai no proximo horario do publicador.'\n    : 'Ela nao vai ser publicada.'\n  : 'Essa oferta nao estava aguardando aprovacao. Provavelmente o botao ja foi usado.';\n\nconst cor = aplicou ? (v.acao === 'aprovar' ? '#1a7f37' : '#b42318') : '#8a6d00';\n\nconst html =\n  '<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">' +\n  '<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">' +\n  '<title>' +\n  titulo +\n  '</title><style>' +\n  'body{margin:0;min-height:100vh;display:grid;place-items:center;' +\n  'font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f6f7f9;padding:24px}' +\n  '.cartao{background:#fff;border-radius:12px;padding:32px;max-width:420px;' +\n  'box-shadow:0 1px 3px rgba(0,0,0,.12);text-align:center}' +\n  'h1{margin:0 0 12px;font-size:20px;color:' +\n  cor +\n  '}' +\n  'p{margin:0;color:#4a5159;line-height:1.5;font-size:15px}' +\n  'code{background:#f0f1f3;padding:2px 6px;border-radius:4px;font-size:13px}' +\n  '@media(prefers-color-scheme:dark){body{background:#16181c}' +\n  '.cartao{background:#1f2226;box-shadow:none}p{color:#a8b0b8}' +\n  'code{background:#2a2e33}}' +\n  '</style></head><body><div class=\"cartao\">' +\n  '<h1>' +\n  titulo +\n  '</h1><p>' +\n  detalhe +\n  '</p><p style=\"margin-top:16px\"><code>oferta ' +\n  v.id +\n  '</code></p>' +\n  '</div></body></html>';\n\nreturn [{ json: { html, aplicou, acao: v.acao, id: v.id } }];"
+      },
+      "id": "ee000000-0000-4000-8000-000000000006",
+      "name": "Montar Resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO logs_execucao (workflow, etapa, status, mensagem)\nVALUES ('E-APROVACAO', '{{ $json.acao }}',\n        '{{ $json.aplicou ? 'OK' : 'AVISO' }}',\n        'oferta {{ $json.id }}: {{ $json.aplicou ? 'decisao aplicada' : 'nao estava em AGUARDANDO' }}')",
+        "options": {}
+      },
+      "id": "ee000000-0000-4000-8000-000000000007",
+      "name": "Log Decisao",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        220
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "mySql": {
+          "id": "",
+          "name": "MySQL ofertas_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('Montar Resposta').first().json.html }}",
+        "options": {
+          "responseContentType": "text/html; charset=utf-8"
+        }
+      },
+      "id": "ee000000-0000-4000-8000-000000000008",
+      "name": "Responder OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.texto }}",
+        "options": {
+          "responseCode": "={{ $json.http }}"
+        }
+      },
+      "id": "ee000000-0000-4000-8000-000000000009",
+      "name": "Responder Erro",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Aprovacao": {
+      "main": [
+        [
+          {
+            "node": "Buscar Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Secret": {
+      "main": [
+        [
+          {
+            "node": "Validar Requisicao",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Requisicao": {
+      "main": [
+        [
+          {
+            "node": "IF Requisicao Valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Requisicao Valida?": {
+      "main": [
+        [
+          {
+            "node": "Aplicar Decisao",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder Erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicar Decisao": {
+      "main": [
+        [
+          {
+            "node": "Montar Resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Resposta": {
+      "main": [
+        [
+          {
+            "node": "Log Decisao",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Decisao": {
+      "main": [
+        [
+          {
+            "node": "Responder OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
